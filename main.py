@@ -45,6 +45,21 @@ def normalize_cpf(cpf_raw: str) -> str:
         return ""
     return digits
 
+def normalize_cnpj_like(value_raw: str) -> str:
+    """
+    Presença está devolvendo numeroInscricaoEmpregador com 8 dígitos (ex: 45736131).
+    Vamos tratar como CNPJ e completar até 14 com zeros à esquerda.
+    """
+    d = only_digits(value_raw or "")
+    if not d:
+        return ""
+    if len(d) < 14:
+        d = d.zfill(14)
+    if len(d) > 14:
+        # se vier maior, mantém os 14 finais (pragmático para teste)
+        d = d[-14:]
+    return d
+
 def random_br_mobile() -> str:
     ddd = random.choice([
         "11","12","13","14","15","16","17","18","19",
@@ -88,6 +103,13 @@ def find_first_url(obj):
         if obj.startswith("http://") or obj.startswith("https://"):
             return obj
     return None
+
+def pretty(obj, limit=4000):
+    try:
+        s = str(obj)
+        return s[:limit]
+    except Exception:
+        return "<unprintable>"
 
 # =========================
 # PRESENÇA LOGIN (TOKEN)
@@ -154,34 +176,20 @@ def presenca_margem(token: str, cpf: str, matricula: str, cnpj: str):
     resp = requests.post(url, json=payload, headers=auth_headers(token), timeout=TIMEOUT_SECONDS)
     return resp.status_code, safe_json(resp)
 
-def presenca_simulacao_disponiveis(token: str, margem_resp: dict, telefone: str, cpf: str):
+def presenca_simulacao_disponiveis(token: str, margem_resp: dict, telefone: str, cpf: str, cnpj: str, matricula: str):
     """
-    Baseado na collection:
     POST /v5/operacoes/simulacao/disponiveis
+    Para teste: preenche o que der, e loga retorno real para ajustarmos depois.
     """
     throttle()
     url = f"{PRESENCA_BASE_URL}/v5/operacoes/simulacao/disponiveis"
 
-    # Tentativas de extrair campos do retorno da margem:
-    # (se algum nome vier diferente, a gente vê no log e ajusta)
     nome = (margem_resp.get("nome") or margem_resp.get("tomador", {}).get("nome") or "TESTE") if isinstance(margem_resp, dict) else "TESTE"
     data_nasc = (margem_resp.get("dataNascimento") or margem_resp.get("tomador", {}).get("dataNascimento") or "1982-10-05") if isinstance(margem_resp, dict) else "1982-10-05"
     nome_mae = (margem_resp.get("nomeMae") or margem_resp.get("tomador", {}).get("nomeMae") or "") if isinstance(margem_resp, dict) else ""
     sexo = (margem_resp.get("sexo") or margem_resp.get("tomador", {}).get("sexo") or "M") if isinstance(margem_resp, dict) else "M"
 
-    cnpj_emp = None
-    reg_emp = None
-    # alguns retornos podem vir em estruturas diferentes
-    for key in ["cnpjEmpregador", "cnpj"]:
-        if isinstance(margem_resp, dict) and margem_resp.get(key):
-            cnpj_emp = only_digits(str(margem_resp.get(key)))
-    if isinstance(margem_resp, dict):
-        ve = margem_resp.get("vinculoEmpregaticio") or {}
-        if isinstance(ve, dict):
-            cnpj_emp = cnpj_emp or only_digits(str(ve.get("cnpjEmpregador") or ve.get("cnpj") or ""))
-            reg_emp = reg_emp or str(ve.get("registroEmpregaticio") or ve.get("matricula") or "")
-
-    # valor da parcela/margem disponivel (tentativas)
+    # valor da parcela/margem (tentativas)
     valor_parcela = None
     for k in ["valorMargemDisponivel", "margemDisponivel", "valorParcela", "parcelaMaxima"]:
         if isinstance(margem_resp, dict) and margem_resp.get(k) is not None:
@@ -203,8 +211,8 @@ def presenca_simulacao_disponiveis(token: str, margem_resp: dict, telefone: str,
             "email": "email@.com",
             "sexo": sexo,
             "vinculoEmpregaticio": {
-                "cnpjEmpregador": cnpj_emp or "",
-                "registroEmpregaticio": reg_emp or ""
+                "cnpjEmpregador": cnpj,
+                "registroEmpregaticio": matricula
             },
             "dadosBancarios": {
                 "codigoBanco": None,
@@ -233,7 +241,7 @@ def presenca_simulacao_disponiveis(token: str, margem_resp: dict, telefone: str,
     }
 
     resp = requests.post(url, json=payload, headers=auth_headers(token), timeout=TIMEOUT_SECONDS)
-    return resp.status_code, safe_json(resp)
+    return resp.status_code, safe_json(resp), payload
 
 # =========================
 # WORKER DO TESTE (15s, tenta a cada 3s)
@@ -259,33 +267,42 @@ def worker_fluxo(job_id: str):
         try:
             token = presenca_login_token()
 
-            # a “verificação” do aceite será: tentar vinculos até passar
+            # Verificação do aceite = tentar vinculos até passar
             st_v, vinc = presenca_vinculos(token, cpf)
-            print(f"[JOB {job_id}] Tentativa vinculos http={st_v}")
+            print(f"[JOB {job_id}] Tentativa vinculos http={st_v} resp={pretty(vinc)}")
 
             if st_v == 200:
-                print(f"[JOB {job_id}] VINCULOS OK: {vinc}")
+                print(f"[JOB {job_id}] VINCULOS OK (raw): {vinc}")
                 set_job(job_id, {"state": "vinculos_ok", "vinculos": vinc})
 
-                # tenta extrair matricula/cnpj do primeiro vínculo encontrado
+                # ======= MAPEAMENTO CORRETO (seu retorno real) =======
+                # vem em: { "id": [ { cpf, elegivel, matricula, numeroInscricaoEmpregador } ] }
                 matricula = ""
                 cnpj = ""
 
-                # tentando encontrar lista de vínculos em qualquer formato
                 candidatos = []
+
                 if isinstance(vinc, dict):
-                    for k in ["vinculos", "data", "items", "resultado"]:
-                        if isinstance(vinc.get(k), list):
-                            candidatos = vinc.get(k)
-                            break
+                    if isinstance(vinc.get("id"), list):
+                        candidatos = vinc.get("id")
+
+                    # fallback: outros formatos (se mudar)
+                    if not candidatos:
+                        for k in ["vinculos", "data", "items", "resultado"]:
+                            if isinstance(vinc.get(k), list):
+                                candidatos = vinc.get(k)
+                                break
+
                 if not candidatos and isinstance(vinc, list):
                     candidatos = vinc
 
                 if candidatos and isinstance(candidatos[0], dict):
                     v0 = candidatos[0]
-                    # nomes possíveis
-                    matricula = str(v0.get("registroEmpregaticio") or v0.get("matricula") or v0.get("registro") or "")
-                    cnpj = only_digits(str(v0.get("cnpjEmpregador") or v0.get("cnpj") or ""))
+                    matricula = str(v0.get("matricula") or v0.get("registroEmpregaticio") or v0.get("registro") or v0.get("matriculaRegistro") or "")
+                    # aqui é o campo que você mostrou:
+                    cnpj = normalize_cnpj_like(str(v0.get("numeroInscricaoEmpregador") or v0.get("cnpjEmpregador") or v0.get("cnpj") or ""))
+
+                print(f"[JOB {job_id}] EXTRAIDO matricula={matricula} cnpj={cnpj}")
 
                 if not matricula or not cnpj:
                     print(f"[JOB {job_id}] Nao encontrei matricula/cnpj no vinculo. Ajustar mapeamento.")
@@ -293,11 +310,14 @@ def worker_fluxo(job_id: str):
                     return
 
                 st_m, margem = presenca_margem(token, cpf, matricula, cnpj)
-                print(f"[JOB {job_id}] MARGEM http={st_m} resp={margem}")
+                print(f"[JOB {job_id}] MARGEM http={st_m} resp={pretty(margem)}")
                 set_job(job_id, {"margem": margem})
 
-                st_s, simul = presenca_simulacao_disponiveis(token, margem if isinstance(margem, dict) else {}, telefone, cpf)
-                print(f"[JOB {job_id}] SIMULACAO http={st_s} resp={simul}")
+                # mesmo se margem não for 200, vamos tentar simulação e logar retorno
+                st_s, simul, payload_sim = presenca_simulacao_disponiveis(token, margem if isinstance(margem, dict) else {}, telefone, cpf, cnpj, matricula)
+                print(f"[JOB {job_id}] SIMULACAO http={st_s} resp={pretty(simul)}")
+                print(f"[JOB {job_id}] SIMULACAO payload_enviado={pretty(payload_sim)}")
+
                 set_job(job_id, {"simulacao": simul, "state": "done"})
                 return
 
@@ -325,12 +345,11 @@ def fluxo_status():
     if not job:
         return jsonify({"ok": False, "error": "job_not_found"}), 404
 
-    # retorna o mínimo pro front exibir
     return jsonify({
         "state": job.get("state"),
         "vinculos": job.get("vinculos"),
         "margem": job.get("margem"),
-        "simulacao": job.get("simulacao")
+        "simulacao": job.get("simulacao"),
     })
 
 @app.get("/presenca/fluxo-teste")
@@ -342,7 +361,6 @@ def fluxo_teste():
 
     telefone = random_br_mobile()
 
-    # gera termo e retorna HTML com link IMEDIATO
     try:
         token = presenca_login_token()
         st, termo_link, autorizacao_id, body = presenca_gerar_termo(token, cpf, telefone)
@@ -350,8 +368,6 @@ def fluxo_teste():
         print(f"[TERMO] cpf={cpf} telefone={telefone} http={st} resp={body}")
 
         if st != 200 or not termo_link:
-            # para você, o ideal era só link, mas se não tem link, não dá.
-            # aqui retornamos texto simples.
             return Response("Falhou ao gerar TERMO_LINK", status=400, mimetype="text/plain")
 
         job_id = str(uuid.uuid4())
@@ -364,11 +380,9 @@ def fluxo_teste():
             "created_at": time.time()
         })
 
-        # dispara worker
         t = threading.Thread(target=worker_fluxo, args=(job_id,), daemon=True)
         t.start()
 
-        # página na MESMA URL: mostra link e vai consultando /fluxo-status a cada 3s (por 15s)
         html = f"""
 <!doctype html>
 <html>
