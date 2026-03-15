@@ -152,7 +152,6 @@ def extract_valor_parcela(margem_resp: dict) -> float:
 
 
 def extract_oferta(simul_resp: Any, fallback_parcela: float) -> Tuple[float, float]:
-    # tenta vários formatos possíveis
     if isinstance(simul_resp, list) and simul_resp:
         first = simul_resp[0]
         if isinstance(first, dict):
@@ -191,7 +190,10 @@ def presenca_login_token() -> str:
     throttle()
     url = f"{PRESENCA_BASE_URL}/login"
     payload = {"login": PRESENCA_LOGIN, "senha": PRESENCA_SENHA}
+    print(f"[PRESENCA] LOGIN -> {url}")
+
     resp = requests.post(url, json=payload, timeout=TIMEOUT_SECONDS)
+    print(f"[PRESENCA] LOGIN STATUS -> {resp.status_code}")
 
     if not resp.ok:
         raise RuntimeError(f"login_falhou_http_{resp.status_code}: {resp.text[:300]}")
@@ -199,7 +201,7 @@ def presenca_login_token() -> str:
     data = safe_json(resp)
     token = data.get("token")
     if not token:
-        raise RuntimeError("token_ausente_no_login")
+        raise RuntimeError(f"token_ausente_no_login: {data}")
     return token
 
 
@@ -212,6 +214,9 @@ def presenca_gerar_termo(token: str, cpf: str, nome: str, telefone: str):
         "telefone": normalize_digits(telefone),
         "produtoId": 28
     }
+    print(f"[PRESENCA] TERMO -> {url}")
+    print(f"[PRESENCA] TERMO PAYLOAD -> {payload}")
+
     resp = requests.post(url, json=payload, headers=auth_headers(token), timeout=TIMEOUT_SECONDS)
     body = safe_json(resp)
 
@@ -221,6 +226,11 @@ def presenca_gerar_termo(token: str, cpf: str, nome: str, telefone: str):
         autorizacao_id = body.get("autorizacaoId") or body.get("id")
     if not autorizacao_id:
         autorizacao_id = find_first_id(body)
+
+    print(f"[PRESENCA] TERMO STATUS -> {resp.status_code}")
+    print(f"[PRESENCA] TERMO ID -> {autorizacao_id}")
+    print(f"[PRESENCA] TERMO LINK -> {termo_link}")
+    print(f"[PRESENCA] TERMO BODY -> {body}")
 
     return resp.status_code, termo_link, autorizacao_id, body
 
@@ -243,23 +253,48 @@ def presenca_assinar_termo(token: str, autorizacao_id: str):
         }
     }
 
+    print(f"[PRESENCA] ASSINAR TERMO -> {url}")
+    print(f"[PRESENCA] ASSINAR TERMO PAYLOAD -> {payload}")
+
     resp = requests.put(url, json=payload, headers=headers, timeout=TIMEOUT_SECONDS)
-    return resp.status_code, safe_json(resp)
+    body = safe_json(resp)
+
+    print(f"[PRESENCA] ASSINAR TERMO STATUS -> {resp.status_code}")
+    print(f"[PRESENCA] ASSINAR TERMO BODY -> {body}")
+
+    return resp.status_code, body
 
 
 def presenca_vinculos(token: str, cpf: str):
     throttle()
     url = f"{PRESENCA_BASE_URL}/v3/operacoes/consignado-privado/consultar-vinculos"
-    resp = requests.post(url, json={"cpf": cpf}, headers=auth_headers(token), timeout=TIMEOUT_SECONDS)
-    return resp.status_code, safe_json(resp)
+    payload = {"cpf": cpf}
+    print(f"[PRESENCA] VINCULOS -> {url}")
+    print(f"[PRESENCA] VINCULOS PAYLOAD -> {payload}")
+
+    resp = requests.post(url, json=payload, headers=auth_headers(token), timeout=TIMEOUT_SECONDS)
+    body = safe_json(resp)
+
+    print(f"[PRESENCA] VINCULOS STATUS -> {resp.status_code}")
+    print(f"[PRESENCA] VINCULOS BODY -> {body}")
+
+    return resp.status_code, body
 
 
 def presenca_margem(token: str, cpf: str, matricula: str, cnpj: str):
     throttle()
     url = f"{PRESENCA_BASE_URL}/v3/operacoes/consignado-privado/consultar-margem"
     payload = {"cpf": cpf, "matricula": matricula, "cnpj": cnpj}
+    print(f"[PRESENCA] MARGEM -> {url}")
+    print(f"[PRESENCA] MARGEM PAYLOAD -> {payload}")
+
     resp = requests.post(url, json=payload, headers=auth_headers(token), timeout=TIMEOUT_SECONDS)
-    return resp.status_code, safe_json(resp)
+    body = safe_json(resp)
+
+    print(f"[PRESENCA] MARGEM STATUS -> {resp.status_code}")
+    print(f"[PRESENCA] MARGEM BODY -> {body}")
+
+    return resp.status_code, body
 
 
 def presenca_simulacao_disponiveis(token: str, margem_resp: dict, telefone: str, cpf: str, cnpj: str, matricula: str):
@@ -316,17 +351,32 @@ def presenca_simulacao_disponiveis(token: str, margem_resp: dict, telefone: str,
         "documentos": []
     }
 
+    print(f"[PRESENCA] SIMULACAO -> {url}")
+    print(f"[PRESENCA] SIMULACAO PAYLOAD -> {payload}")
+
     resp = requests.post(url, json=payload, headers=auth_headers(token), timeout=TIMEOUT_SECONDS)
-    return resp.status_code, safe_json(resp), payload
+    body = safe_json(resp)
+
+    print(f"[PRESENCA] SIMULACAO STATUS -> {resp.status_code}")
+    print(f"[PRESENCA] SIMULACAO BODY -> {body}")
+
+    return resp.status_code, body, payload
 
 
 def rodar_fluxo_presenca(cpf: str, nome: str, telefone: str, autorizacao_id: Optional[str] = None) -> Dict[str, Any]:
-    token = presenca_login_token()
+    print("=== INICIO FLUXO PRESENCA ===")
+    print("cpf:", cpf)
+    print("nome:", nome)
+    print("telefone:", telefone)
+    print("autorizacao_id recebida:", autorizacao_id)
 
-    # Se já veio autorizacao_id, tenta assinar primeiro
+    token = presenca_login_token()
+    print("[PRESENCA] login ok")
+
     if autorizacao_id:
         st_put, put_body = presenca_assinar_termo(token, autorizacao_id)
         if st_put not in (200, 201, 204):
+            print("[PRESENCA] falha ao assinar termo")
             return {
                 "status": "erro",
                 "mensagem": "Falha ao assinar termo",
@@ -334,15 +384,14 @@ def rodar_fluxo_presenca(cpf: str, nome: str, telefone: str, autorizacao_id: Opt
                 "detalhe": put_body
             }
 
-    # Sempre tenta gerar/obter termo
     st_termo, termo_link, termo_id, termo_body = presenca_gerar_termo(token, cpf, nome, telefone)
 
-    # Tenta seguir direto
     st_v, vinc_body = presenca_vinculos(token, cpf)
     vinculos = extract_candidates_vinculos(vinc_body)
 
-    # Se não conseguiu seguir e ainda não temos autorização concluída, devolve pendência
     if st_v != 200 or not vinculos:
+        print("[PRESENCA] fluxo parou em aguardando_autorizacao")
+        print("=== FIM FLUXO PRESENCA ===")
         return {
             "status": "aguardando_autorizacao",
             "mensagem": "Cliente precisa concluir autorização",
@@ -355,7 +404,11 @@ def rodar_fluxo_presenca(cpf: str, nome: str, telefone: str, autorizacao_id: Opt
         }
 
     vinculo = pick_vinculo(vinculos)
+    print("[PRESENCA] vinculo escolhido:", vinculo)
+
     if not vinculo:
+        print("[PRESENCA] nenhum vinculo encontrado")
+        print("=== FIM FLUXO PRESENCA ===")
         return {
             "status": "sem_oferta",
             "elegibilidade": "nao",
@@ -381,7 +434,12 @@ def rodar_fluxo_presenca(cpf: str, nome: str, telefone: str, autorizacao_id: Opt
         or ""
     )
 
+    print("[PRESENCA] matricula:", matricula)
+    print("[PRESENCA] cnpj:", cnpj)
+
     if not matricula or not cnpj:
+        print("[PRESENCA] falha ao extrair matricula/cnpj")
+        print("=== FIM FLUXO PRESENCA ===")
         return {
             "status": "erro",
             "mensagem": "Não foi possível extrair matrícula/cnpj do vínculo",
@@ -390,6 +448,8 @@ def rodar_fluxo_presenca(cpf: str, nome: str, telefone: str, autorizacao_id: Opt
 
     st_m, margem_body = presenca_margem(token, cpf, matricula, cnpj)
     if st_m != 200:
+        print("[PRESENCA] falha ao consultar margem")
+        print("=== FIM FLUXO PRESENCA ===")
         return {
             "status": "erro",
             "mensagem": "Falha ao consultar margem",
@@ -397,6 +457,7 @@ def rodar_fluxo_presenca(cpf: str, nome: str, telefone: str, autorizacao_id: Opt
         }
 
     valor_parcela = extract_valor_parcela(margem_body)
+    print("[PRESENCA] valor_parcela:", valor_parcela)
 
     st_s, simul_body, payload_sim = presenca_simulacao_disponiveis(
         token=token,
@@ -408,6 +469,8 @@ def rodar_fluxo_presenca(cpf: str, nome: str, telefone: str, autorizacao_id: Opt
     )
 
     if st_s != 200:
+        print("[PRESENCA] falha na simulacao")
+        print("=== FIM FLUXO PRESENCA ===")
         return {
             "status": "erro",
             "mensagem": "Falha na simulação",
@@ -419,6 +482,9 @@ def rodar_fluxo_presenca(cpf: str, nome: str, telefone: str, autorizacao_id: Opt
         }
 
     valor_disponivel, parcela = extract_oferta(simul_body, valor_parcela)
+    print("[PRESENCA] valor_disponivel:", valor_disponivel)
+    print("[PRESENCA] parcela:", parcela)
+    print("=== FIM FLUXO PRESENCA ===")
 
     return {
         "status": "sucesso" if elegivel_bool else "sem_oferta",
@@ -483,6 +549,7 @@ def consulta():
         })
 
     except Exception as e:
+        print("[ERRO GERAL]", str(e))
         return jsonify({
             "status": "erro",
             "mensagem": str(e)
